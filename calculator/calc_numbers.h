@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cmath>
 #include <atomic>
@@ -12,6 +12,14 @@ namespace calc {
     constexpr std::size_t BITS_PER_BYTE = 8;
     constexpr std::size_t DIGITS_PER_BLOCK = 8;
 
+
+
+    /*
+    * symbol_vec: a string representing the unique numerals
+    * 
+    *   The string "0123456789" decribes numerals with a base of ten. The string's order describes each numerals significance. The string
+    * "9876543210" would produce the same awnsers to the string "0123456789", only differentiated in their symbol order.
+    */
     struct alignas(std::uint64_t) number_base {
         const char* symbol_vec{};
 
@@ -19,19 +27,23 @@ namespace calc {
             : symbol_vec(symbol_vec) {}
     };
 
+
+
     /*
-         | Digit | Bits
-         +_______+____________
-         |  0    | 00110010
-         |  1    | 00010111
-         |  2    | 00011100
-         |  3    | 10010100
-         |  4    | 00000000
-         |  5    | 00000000
-         |  6    | 00000000
-         |  7    | 00000000
-         |  8    | 00000000
-         |  9    | 00000000
+    *   ┌────────┬──────────┐ 
+    *   │ Digit  │ Bits     │
+    *   ╞════════╪══════════╡
+    *   │ 0      │ 00110010 │
+    *   │ 1      │ 00010111 │
+    *   │ 2      │ 00011100 │
+    *   │ 3      │ 10010100 │
+    *   │ 4      │ 00000000 │
+    *   │ 5      │ 00000000 │
+    *   │ 6      │ 00000000 │
+    *   │ 7      │ 00000000 │
+    *   │ 8      │ 00000000 │
+    *   │ 9      │ 00000000 │
+    *   └────────┴──────────┘
     */
     struct alignas(std::uint64_t) digit_block_data {
         std::uint64_t field_00_07 : 8 {};
@@ -50,11 +62,11 @@ namespace calc {
 
         using size_type = std::size_t;
 
-        digit_block_data* data{};       /* pointer to a data chunk */
+        digit_block_data* data{};       /* pointer to a data chunk           */
         digit_block* next{};
         digit_block* prev{};
 
-        std::atomic<bool> attention{};  /* for multi-threading */
+        std::atomic<bool> attention{};  /* for multi-threading               */
         digit_block_data* carry_data{}; /* carry storage for multi-threading */
 
         void set_fields(std::uint64_t& new_fields) const {
@@ -85,7 +97,7 @@ namespace calc {
 
 
 
-    struct problem{};
+    struct alignas(std::uint64_t) problem{};
 
 
 
@@ -96,15 +108,16 @@ namespace calc {
         number_base* base{};
         std::atomic_bool negative{};
 
-        /* block is both the first and last block in the chain */
+        /* block is the array of blocks in the chain */
         digit_block* block{};
         size_type size{};
 
-        /* locks */
         /* if false: prevents indexing of blocks */
         std::atomic<bool> threads_may_index{ false };
-        /* if true: prevents locking of threads_may_index */
-        std::atomic<bool> threads_are_indexing{ false };
+        /* claims the privilege to write to threads_may_index */
+        std::mutex index_control_lock{};
+        /* theads halted priour to indexing get notified via this variable */
+        std::condition_variable index_control_release{};
         std::atomic<std::uint64_t> indexing_thread_count{};
 
 
@@ -127,47 +140,53 @@ namespace calc {
                     delete current_block->carry_data;
                     current_block->carry_data = nullptr;
                 }
-                /* Unlink the current block from the previous block */
+
                 /*
-                    +----------+           +---------+
-                    | Previous |- - -X- - >| Current |
-                    | Block    |<----------| Block   |
-                    +----------+   		   +---------+
+                *   +----------+           +----------+           +----------+
+                *   | Other    |--- ... -->| Previous |- - -X- - >| Current  |
+                *   | Blocks   |<-- ... ---| Block    |<----------| Block    |
+                *   +----------+           +----------+           +----------+
+                * 
+                *       Unlink the current block from the previous block
                 */
                 if (current_block->prev) {
                     current_block->prev->next = nullptr;
                 }
-                /*
-                    +----------+           +---------+
-                    | Previous |           | Current |
-                    | Block    |< - -X- - -| Block   |
-                    +----------+   		   +---------+
 
-                        Due to the allocation scheme current_block is not a resource of itself. The chain of blocks was the dynamic allocation
-                    of an pointer array. So, current_block
+                /*
+                *   +----------+           +----------+           +----------+
+                *   | Other    |--- ... -->| Previous |           | Current  |
+                *   | Blocks   |<-- ... ---| Block    |< - -X- - -| Block    |
+                *   +----------+           +----------+           +----------+
+                *
+                *       Due to the allocation scheme current_block is not a resource of itself. The chain of blocks was the dynamic allocation
+                *   of an pointer array. So, current_block
                 */
                 current_block->prev = nullptr;
 
-                /* iteratively free blocks */
-                /*
-                    +----------+           +----------+           +----------+           +---------+
-                    | Other    |--- ... -->| Last     |           | First    |--- ... -->| Other   |
-                    | Blocks   |<-- ... ---| Block    |           | Block    |<-- ... ---| Blocks  |
-                    +----------+   		   +----------+   		  +----------+   		 +---------+
-
-                    Explanation
-
-                        Iteration ends when control flows from the intial block to the final block. By severing the last and first block of the
-                    chain the result is an eventual call to free_recursive with a nullptr. The cain is traversed in order of first to last by
-                    following the next pointer of every block. If a block becomes corrupt or lost there is no ledger which tracks the allocation
-                    blocks, aside from the chain itself.
+                /* iteratively free blocks
+                * 
+                *   +----------+           +----------+           +----------+           +----------+
+                *   | Other    |--- ... -->| Last     |           | First    |--- ... -->| Other    |
+                *   | Blocks   |<-- ... ---| Block    |           | Block    |<-- ... ---| Blocks   |
+                *   +----------+           +----------+           +----------+           +----------+
+                *
+                *   Explanation:
+                *
+                *       Iteration ends when control flows from the intial block to the final block. By severing the first and last block of the
+                *   chain the result is an eventual nullptr held in current_block. The cain is traversed in order of first to last by following
+                *   the next pointer of every block. If a block becomes corrupt or lost there is no ledger which tracks the allocation blocks,
+                *   aside from the chain itself.
                 */
                 current_block = current_block->next;
             }
         }
         void free() {
+            std::lock_guard<std::mutex> lock{ index_control_lock };
             threads_may_index.store(false);
-            indexing_thread_count.wait(0);
+
+            if (indexing_thread_count.load() > 0)
+                indexing_thread_count.wait(0);
 
             if (block != nullptr) {
                 free_iterative(block);
@@ -177,58 +196,52 @@ namespace calc {
             }
         }
 
-
-        void print_recursive(digit_block* current_block) {
-            if (current_block == nullptr) return;
-
-            std::cout
-                << "***************** print recursion *****************\n\n"
-                << "current_block    " << ": is located at 0x" << std::hex << current_block << "\n\n";
-
-            std::cout
-                << "block 0x" << std::hex << current_block << " is being viewed" << "\n"
-                << "    data         " << ": is located at 0x" << std::hex << current_block->data << "\n"
-                << "    &data        " << ": is offset by  0x"
-                << std::hex << reinterpret_cast<std::uint64_t>(&(current_block->data)) - reinterpret_cast<std::uint64_t>(current_block) << "\n"
-                << "    carry_data   " << ": is located at 0x" << std::hex << current_block->carry_data << "\n"
-                << "    &carry_data  " << ": is offset by  0x"
-                << std::hex << reinterpret_cast<std::uint64_t>(&(current_block->carry_data)) - reinterpret_cast<std::uint64_t>(current_block) << "\n"
-                << "    next*        " << ": 0x" << std::hex << current_block->next << "\n"
-                << "    prev*        " << ": 0x" << std::hex << current_block->next << "\n\n";
-
-            //std::uint64_t padwidth{ std::to_string(size).size() };
-            //for (size_type ind{}; ind < size; ind++) {
-            //	std::cout
-            //		<< "block " << std::setw(padwidth) << ind << " : is located at " << std::hex << &block[ind] << "\n"
-            //		<< "    data         " << ": is located at 0x" << std::hex << block[ind].data << "\n"
-            //		<< "    carry_data   " << ": is located at 0x" << std::hex << block[ind].carry_data << "\n"
-            //		<< "    next*        " << ": 0x" << std::hex << block[ind].next << "\n"
-            //		<< "    prev*        " << ": 0x" << std::hex << block[ind].prev << "\n\n";
-            //}
-
-            if (current_block == &block[size]) return;
-
-            print_recursive(current_block + 1);
-        }
         void print() {
-            if (block != nullptr) {
-                std::cout
-                    << "***************** printing blocks *****************\n\n"
-                    << "the first block  : is located at 0x" << std::hex << &block[0] << "\n"
-                    << "the last block   : is located at 0x" << std::hex << &block[size - 1] << "\n\n";
+            if (block == nullptr) return;
 
-                print_recursive(block);
+            std::wcout
+                << L"┌number" << "\n"
+                << L"└───┬location         : 0x" << std::hex << this << "\n"
+                << L"    ├base             : " << std::dec << std::strlen(base->symbol_vec) << "\n"
+                << L"    ├symbol vector    : " << std::dec << base->symbol_vec << "\n"
+                << L"    ├value            : ";
 
-                std::cout
-                    << "*************** end print recursion ***************\n\n";
-            }
+            digit_block* current_block{ block[0].prev };
+            std::uint64_t symbol_len{ std::strlen(base->symbol_vec) };
+            std::wstring wstr{};
+
+            do {
+                /* print in reverse order */
+                wstr += std::to_wstring(current_block->data->field_56_63);
+                wstr += std::to_wstring(current_block->data->field_48_55);
+                wstr += std::to_wstring(current_block->data->field_40_47);
+                wstr += std::to_wstring(current_block->data->field_32_39);
+                wstr += std::to_wstring(current_block->data->field_24_31);
+                wstr += std::to_wstring(current_block->data->field_16_23);
+                wstr += std::to_wstring(current_block->data->field_08_15);
+                wstr += std::to_wstring(current_block->data->field_00_07);
+
+                current_block = current_block->prev;
+            } while (current_block != block[0].prev);
+
+             std::wcout
+                << wstr << "\n"
+                << L"    │\n"
+                << L"    ├first block      : 0x" << std::hex << &block[0] << "\n"
+                << L"    ├last block       : 0x" << std::hex << &block[size - 1] << "\n"
+                << "\n";
+
+            //print_iterative(block);
         }
 
         digit_block* get_block(size_type ind) {
-            if (ind > size) return nullptr;
+            if (indexing_thread_count.load(std::memory_order::acquire) > 0)
+                indexing_thread_count++;
 
-            threads_may_index.wait(true);
-            indexing_thread_count++;
+            if (ind > size) {
+                indexing_thread_count--;
+                return nullptr;
+            }
 
             digit_block* result{ &block[ind] };
 
@@ -241,9 +254,10 @@ namespace calc {
             this->free();
 
             /* calculate the number of digit blocks required to fit all the digits of the string */
-            std::uint64_t digit_blocks_req{ (strlen(str) + DIGITS_PER_BLOCK - 1) / DIGITS_PER_BLOCK };
+            std::uint64_t str_len{ std::strlen(str) };
+            std::uint64_t digit_blocks_req{ (str_len + DIGITS_PER_BLOCK - 1) / DIGITS_PER_BLOCK };
 
-            /* atleast one block is always created */
+            /* allocate at least one block */
             if (digit_blocks_req == 0) digit_blocks_req = 1;
 
             /* store the size of the list */
@@ -258,54 +272,61 @@ namespace calc {
 
             /* create additional blocks and link them */
             for (std::uint64_t ind{ 1 }; ind < digit_blocks_req; ind++) {
-                /* create the new block */
-                /*
-                    +----------+           +----------+           +---------+
-                    | Other    |--- ... -->| Previous |           | New     |
-                    | Blocks   |<-- ... ---| Block    |           | Block   |
-                    +----------+   		   +----------+   		  +---------+
+                /*  create a new block
+                * 
+                *   +----------+           +----------+           +----------+
+                *   | Other    |--- ... -->| Previous |           | New      |
+                *   | Blocks   |<-- ... ---| Block    |           | Block    |
+                *   +----------+           +----------+           +----------+
                 */
                 block[ind].data = new digit_block_data{};
                 block[ind].carry_data = new digit_block_data{};
 
-                /* link the blocks */
-                /*
-                    +----------+           +----------+           +---------+
-                    | Other    |--- ... -->| Previous |--- mew -->| New     |
-                    | Blocks   |<-- ... ---| Block    |           | Block   |
-                    +----------+   		   +----------+   		  +---------+
+                /*  link the new and previous blocks, the previous block's next ptr adresses the new block
+                * 
+                *   +----------+           +----------+           +----------+
+                *   | Other    |--- ... -->| Previous |--- new -->| New      |
+                *   | Blocks   |<-- ... ---| Block    |           | Block    |
+                *   +----------+           +----------+           +----------+
                 */
-                block[ind - 1].next = &block[ind]; /* set the previous block's next ptr */
-                /*
-                    +----------+           +----------+           +---------+
-                    | Other    |--- ... -->| Previous |---------->| New     |
-                    | Blocks   |<-- ... ---| Block    |<-- new ---| Block   |
-                    +----------+   		   +----------+   		  +---------+
+                block[ind - 1].next = &block[ind];
+
+                /*  the new block's prev ptr adresses the previous block
+                * 
+                *   +----------+           +----------+           +----------+
+                *   | Other    |--- ... -->| Previous |---------->| New      |
+                *   | Blocks   |<-- ... ---| Block    |<-- new ---| Block    |
+                *   +----------+           +----------+           +----------+
                 */
-                block[ind].prev = &block[ind - 1]; /* set the new block's prev ptr */
+                block[ind].prev = &block[ind - 1];
             }
 
-            /* final link to make the block chain circular */
-            /*
-                    +----------+           +----------+           +----------+           +---------+
-                    | Other    |--- ... -->| Last     |--- new -->| First    |--- ... -->| Other   |
-                    | Blocks   |<-- ... ---| Block    |           | Block    |<-- ... ---| Blocks  |
-                    +----------+   		   +----------+   		  +----------+   		 +---------+
+            /*  final links make the block chain circular, the last block points to the first block
+            * 
+            *       +----------+           +----------+           +----------+           +----------+
+            *       | Other    |--- ... -->| Last     |--- new -->| First    |--- ... -->| Other    |
+            *       | Blocks   |<-- ... ---| Block    |           | Block    |<-- ... ---| Blocks   |
+            *       +----------+           +----------+           +----------+           +----------+
             */
-            block[digit_blocks_req - 1].next = &block[0]; /* the last block points to the first block */
-            /*
-                    +----------+           +----------+           +----------+           +---------+
-                    | Other    |--- ... -->| Last     |---------->| First    |--- ... -->| Other   |
-                    | Blocks   |<-- ... ---| Block    |<-- new ---| Block    |<-- ... ---| Blocks  |
-                    +----------+   		   +----------+   		  +----------+   		 +---------+
+            block[digit_blocks_req - 1].next = &block[0];
+
+            /*  the first block points to the last block
+            * 
+            *       +----------+           +----------+           +----------+           +----------+
+            *       | Other    |--- ... -->| Last     |---------->| First    |--- ... -->| Other    |
+            *       | Blocks   |<-- ... ---| Block    |<-- new ---| Block    |<-- ... ---| Blocks   |
+            *       +----------+           +----------+           +----------+           +----------+
             */
-            block[0].prev = &block[digit_blocks_req - 1]; /* the first block points to the last block */
+            block[0].prev = &block[digit_blocks_req - 1];
 
-            std::uint64_t digit_ind{};
-            std::uint64_t str_len{ strlen(str) };
-            std::uint64_t symbol_len{ strlen(base->symbol_vec) };
+            std::uint64_t digit_ind{ str_len - 1 };
+            std::uint64_t symbol_len{ std::strlen(base->symbol_vec) };
 
-            /* loop over the string and assign the digits to blocks */
+            /*
+            *       Loop over the string and assign the digits to blocks. The digits are read in reverse order as the least significant digit is
+            *   assumed to be on the right. It is persumed intuitive that a number would be writen in order of most to least significant as with
+            *   english you would be reading left to right.
+            */
             for (std::uint64_t str_ind{}; str_ind < str_len; str_ind++) {
                 /* Loop over the symbols in the base's symbol_vec */
                 for (std::uint64_t symbol_ind{}; symbol_ind < symbol_len; symbol_ind++) {
@@ -317,8 +338,11 @@ namespace calc {
                 }
 
                 /* increment index */
-                digit_ind++;
+                digit_ind--;
             }
+
+            std::lock_guard<std::mutex> lock{ index_control_lock };
+            threads_may_index.store(true);
         }
 
         void resize(const std::size_t& new_size) {
