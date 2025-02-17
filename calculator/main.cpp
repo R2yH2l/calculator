@@ -23,12 +23,36 @@ int main() {
 
 	calc::number num1{ &base10 };
 	calc::number num2{ &base10 };
+	calc::number num3{ &base10 };
+	calc::number num4{ &base10 };
 
 	std::vector<int> vec{};
 
-	num1.assign("4563295794213504");
+	num1.assign("11145 67821 34621 78346 17823 64");
+	num2.assign("22222222");
+	num3.assign("33333333");
+	num4.assign("44444444");
 
-	num1.print();
+	//num1.print();
+	//num2.print();
+	//num3.print();
+	//num4.print();
+
+	//std::wcout << num1;
+
+	auto&& prob{ num1 * (num3 * num4 + num2) };
+
+	auto&& exp_size{ prob->expression.size() };
+
+	for (std::size_t ind{}; ind < exp_size; ind++) {
+		if (prob->expression[ind]->term == nullptr)
+			continue;
+
+		std::wcout << *prob->expression[ind]->term << " " << prob->expression[ind]->operand;
+
+		if (ind < exp_size - 1)
+			std::wcout << "\n";
+	}
 
 	return 0;
 }
